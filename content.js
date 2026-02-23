@@ -1,11 +1,9 @@
-// Only run in the TOP frame — not in iframes
-if (window !== window.top) throw new Error('IGR: Skipping iframe');
-
-console.log("IGR Scraper: Content Script Loaded");
-
+// Run in all frames (IGR sometimes uses frames for the grid)
+console.log("IGR Scraper: Content Script Loaded in " + (window === window.top ? "Top Frame" : "Sub-frame"));
 
 let extractionConfig = {
-    linkSelector: "input[value='IndexII'], input[id*='btnIndex2'], a[id*='btnIndex2'], a.view-link, a[href*='Index2']",
+    // Robust selector covering variations seen on IGR
+    linkSelector: "input[value*='ndex'], input[onclick*='ndexII'], a[onclick*='ndexII'], [id*='btnIndex']",
     highlightColor: "3px solid #6366f1",
     delay: 3000
 };
@@ -16,19 +14,14 @@ function sendLog(message, logType = 'info') {
     }
 }
 
-// Helper to check if extension context is still valid
 function isContextValid() {
     return typeof chrome !== 'undefined' && chrome.runtime && !!chrome.runtime.id;
 }
 
-// Polling/Resume logic
 function checkAndRun() {
     if (!isContextValid()) return;
-
     chrome.storage.local.get(['isRunning', 'urls', 'pages'], (data) => {
         if (data.isRunning) {
-            console.log(`IGR Scraper: Resuming execution (Page ${data.pages || 0})...`);
-            sendLog(`Resuming extraction on Page ${data.pages || 0}...`, 'info');
             scrapeWithRetry(data.urls || [], data.pages || 0);
         }
     });
@@ -37,29 +30,26 @@ function checkAndRun() {
 async function scrapeWithRetry(existingUrls, pagesCount, attempt = 1) {
     if (!isContextValid()) return;
 
-    console.log(`IGR Scraper: Scanning page, attempt ${attempt}...`);
-    if (attempt === 1) sendLog(`Scanning Page ${pagesCount + 1} for documents...`, 'info');
-
-    // 1. Find the Grid
     const grid = document.getElementById('RegistrationGrid');
-    if (!grid) {
-        console.warn("RegistrationGrid not found yet.");
-    }
-
-    // 2. Find all buttons (Targeting the specific onclick structure you mentioned)
-    const allLinks = document.querySelectorAll("input[value='IndexII'], input.Button[onclick*='indexII'], a[id*='btnIndex2']");
-
-    if (allLinks.length === 0 && attempt < 6) {
-        console.log("No buttons found yet, retrying in 2.5s...");
-        setTimeout(() => scrapeWithRetry(existingUrls, pagesCount, attempt + 1), 2500);
-        return;
-    }
+    const allLinks = Array.from(document.querySelectorAll(extractionConfig.linkSelector))
+        .filter(el => {
+            const val = (el.value || el.innerText || '').toLowerCase();
+            const onClick = (el.getAttribute('onclick') || '').toLowerCase();
+            return val.includes('index') || onClick.includes('indexii');
+        });
 
     if (allLinks.length === 0) {
-        sendLog("No documents found. Make sure search results are visible.", "warn");
+        if (attempt < 5) {
+            console.log(`IGR Scraper: No buttons yet (Attempt ${attempt}). Grid found: ${!!grid}. Retrying...`);
+            setTimeout(() => scrapeWithRetry(existingUrls, pagesCount, attempt + 1), 2000);
+            return;
+        }
+        // Only log "None found" in the top frame to avoid spam
+        if (window === window.top) sendLog("No documents found on this page.", "warn");
         return;
     }
 
+    console.log(`IGR Scraper: Found ${allLinks.length} documents on this page.`);
     sendLog(`Found ${allLinks.length} documents. Starting extraction...`, "success");
     scrapePage(existingUrls, pagesCount, Array.from(allLinks));
 }
@@ -79,46 +69,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendLog("Extraction stopped.", "warn");
     }
 
-    if (request.action === 'clickButton') {
-        const targetAttr = `indexII$${request.index}`;
-
-        // 1. Clear previous flags
-        document.querySelectorAll('[data-target-active]').forEach(el => {
-            el.removeAttribute('data-target-active');
-            el.style.border = '';
-            el.style.backgroundColor = '';
-        });
-
-        // 2. Re-scan DOM
-        let btn = document.querySelector(`input[onclick*="${targetAttr}"]`);
-
-        if (!btn) {
-            const allBtns = Array.from(document.querySelectorAll("input[type='button'], input.Button"));
-            btn = allBtns.find(b => (b.getAttribute('onclick') || '').includes(targetAttr));
-        }
-
-        if (btn) {
-            console.log(`IGR Scraper: Found Row ${request.index + 1} button`);
-            btn.style.border = "2px solid #6366f1";
-            btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            btn.setAttribute('data-target-active', 'true');
-
-            // 3. New logic: Perform the click internally if requested
-            if (request.performClick) {
-                console.log(`IGR Scraper: Triggering click for Row ${request.index + 1}`);
-                setTimeout(() => {
-                    btn.click();
-                }, 500);
-            }
-
-            // Send success back to background
-            if (sendResponse) sendResponse({ success: true });
-        } else {
-            if (sendResponse) sendResponse({ success: false });
-        }
-        return true;
-    }
-
     if (request.action === 'pageFinished') {
         chrome.storage.local.get(['isRunning', 'pages'], (data) => {
             if (!data.isRunning) return;
@@ -131,7 +81,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 console.log("IGR Scraper: Batch finished. Moving to next page...");
                 sendLog(`Moving to Page ${nextPagesCount + 1}...`, "info");
                 nextBtn.setAttribute('data-scraper-id', 'next-page-btn');
-                // Tell background to click the next page AND then trigger a rescan
                 chrome.runtime.sendMessage({
                     action: 'triggerNextPage',
                     nextPage: nextPagesCount
@@ -145,17 +94,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         });
     }
 
-    // Background asks content.js to scan the newly loaded page after AJAX pagination
     if (request.action === 'rescan') {
         chrome.storage.local.get(['isRunning', 'urls', 'pages'], (data) => {
             if (!data.isRunning) return;
             console.log(`IGR Scraper: Rescanning after pagination (Page ${data.pages || 0})...`);
-            sendLog(`Scanning Page ${(data.pages || 0) + 1} for documents...`, 'info');
             scrapeWithRetry(data.urls || [], data.pages || 0);
         });
     }
 });
-
 
 async function scrapePage(existingUrls, pagesCount, allLinks) {
     if (!isContextValid()) return;
@@ -164,7 +110,6 @@ async function scrapePage(existingUrls, pagesCount, allLinks) {
     const newLinks = [];
 
     allLinks.forEach((link, index) => {
-        // Attempt to extract the TRUE index from the onclick attribute
         let realIndex = index;
         const onclickText = link.getAttribute('onclick') || '';
         const match = onclickText.match(/indexII\$(\d+)/);
@@ -184,17 +129,13 @@ async function scrapePage(existingUrls, pagesCount, allLinks) {
                 const dName = row.cells[1].innerText.trim();
                 const rDate = row.cells[2].innerText.trim();
                 docName = `${docNo}_${dName}_${rDate}`.replace(/[\\/:*?"<>|]/g, '_');
-                docName = docName.replace(/[\s.]+$/, '').substring(0, 80);
             }
-        } catch (e) {
-            console.error("Naming error:", e);
-        }
+        } catch (e) { }
 
         let item = {
             id: scraperId,
-            index: realIndex, // Crucial for re-finding the button after refresh
+            index: realIndex,
             filename: `${docName}_P${pagesCount + 1}_R${realIndex + 1}`,
-            text: "IndexII",
             scrapedAt: new Date().toISOString()
         };
 
@@ -214,7 +155,7 @@ async function scrapePage(existingUrls, pagesCount, allLinks) {
         });
 
         if (queueForBackground.length > 0) {
-            sendLog(`Enqueueing ${queueForBackground.length} documents for download...`, 'info');
+            console.log(`IGR Scraper: Enqueueing ${queueForBackground.length} documents...`);
             chrome.runtime.sendMessage({
                 action: 'enqueueDownloads',
                 links: queueForBackground
@@ -224,87 +165,28 @@ async function scrapePage(existingUrls, pagesCount, allLinks) {
 }
 
 function findNextButton() {
-    // ── Strategy 1: ASP.NET Page$N postback pattern (most reliable for IGR)
-    // Find all pagination links using the __doPostBack Page$N pattern
     const allPageLinks = Array.from(document.querySelectorAll("a[href*='Page$'], a[onclick*='Page$']"));
-
-    if (allPageLinks.length > 0) {
-        // Find current page — it's a <span> (not a link) inside the grid's last row
-        const grid = document.getElementById('RegistrationGrid');
-        let currentPage = 1;
-
-        if (grid) {
-            // The current page is shown as a <span> or <b> (not a link) in the pager row
-            const pagerRow = grid.querySelector('tr:last-child');
-            if (pagerRow) {
-                const currentSpan = pagerRow.querySelector('span, b');
-                if (currentSpan) {
-                    const parsed = parseInt(currentSpan.innerText.trim());
-                    if (!isNaN(parsed)) currentPage = parsed;
-                }
-            }
-        }
-
-        // Find link for page currentPage + 1
-        const nextPageNum = currentPage + 1;
-        const nextLink = allPageLinks.find(a => {
-            const txt = (a.innerText || a.textContent || '').trim();
-            return parseInt(txt) === nextPageNum;
-        });
-        if (nextLink) {
-            console.log(`IGR Scraper: Found next page link → Page ${nextPageNum}`);
-            return nextLink;
-        }
-
-        // If next number not visible, check for "..." link AFTER current page
-        const ellipsisLinks = allPageLinks.filter(a =>
-            (a.innerText || '').trim() === '...' &&
-            (a.getAttribute('onclick') || '').includes(`Page$${nextPageNum}`)
-        );
-        if (ellipsisLinks.length > 0) return ellipsisLinks[0];
-    }
-
-    // ── Strategy 2: Search inside RegistrationGrid pager row by background color
     const grid = document.getElementById('RegistrationGrid');
+    let currentPage = 1;
+
     if (grid) {
-        const pagerSelectors = [
-            "tr[style*='background-color:#CCCCCC'] table",
-            "tr[style*='background-color:Silver'] table",
-            "tr[style*='background-color: #CCCCCC'] table",
-            "tr.GridPager table",
-            "tr td[colspan] table"
-        ];
-        for (const sel of pagerSelectors) {
-            const paginationTable = grid.querySelector(sel);
-            if (paginationTable) {
-                const currentSpan = paginationTable.querySelector("span");
-                const links = Array.from(paginationTable.querySelectorAll("a"));
-                if (currentSpan && links.length > 0) {
-                    const currentPageNum = parseInt(currentSpan.innerText);
-                    for (let link of links) {
-                        if (parseInt(link.innerText) === currentPageNum + 1) return link;
-                    }
-                    // Look for "..." after current page
-                    for (let link of links) {
-                        if (link.innerText.trim() === '...') {
-                            const allTds = Array.from(paginationTable.querySelectorAll("td"));
-                            const spanTd = currentSpan.closest("td");
-                            const linkTd = link.closest("td");
-                            if (allTds.indexOf(linkTd) > allTds.indexOf(spanTd)) return link;
-                        }
-                    }
-                }
+        const pagerRow = grid.querySelector('tr:last-child');
+        if (pagerRow) {
+            const currentSpan = pagerRow.querySelector('span, b');
+            if (currentSpan) {
+                const parsed = parseInt(currentSpan.innerText.trim());
+                if (!isNaN(parsed)) currentPage = parsed;
             }
         }
     }
 
-    // ── Strategy 3: Generic text match (last resort)
-    for (const el of document.querySelectorAll('a, button, input[type="button"]')) {
-        const text = (el.innerText || el.value || '').toLowerCase().trim();
-        if (['next', '>>', 'next page', '›', '»'].includes(text)) return el;
-    }
+    const nextPageNum = currentPage + 1;
+    const nextLink = allPageLinks.find(a => (parseInt(a.innerText.trim()) === nextPageNum) || ((a.innerText.trim() === '...') && (a.getAttribute('onclick') || '').includes(`Page$${nextPageNum}`)));
 
-    return document.querySelector("[id*='btnNext'], .next, .PagerNext, [id*='lnkNext']");
+    if (nextLink) return nextLink;
+
+    // Last resort
+    return document.querySelector("[id*='btnNext'], .next, .PagerNext");
 }
 
 if (document.readyState === 'complete') {
@@ -312,8 +194,3 @@ if (document.readyState === 'complete') {
 } else {
     window.addEventListener('load', () => setTimeout(checkAndRun, 2500));
 }
-
-window.onerror = function (msg, url, line) {
-    console.log("IGR Scraper Error:", msg, "at", line);
-    return false;
-};

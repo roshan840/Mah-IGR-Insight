@@ -8,11 +8,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const delayInput = document.getElementById('delayInput');
     const logArea = document.getElementById('logArea');
 
+    const scrapedCountEle = document.getElementById('scrapedCount');
+
     let isRunning = false;
 
     // Load initial state
-    chrome.storage.local.get(['urls', 'pages', 'isRunning', 'configDelay'], (data) => {
+    chrome.storage.local.get(['urls', 'scrapedResults', 'pages', 'isRunning', 'configDelay'], (data) => {
         const urls = data.urls || [];
+        const scraped = data.scrapedResults || [];
         const pages = data.pages || 0;
         isRunning = data.isRunning || false;
 
@@ -21,6 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         urlCountEle.textContent = urls.length;
+        scrapedCountEle.textContent = scraped.length;
         pageCountEle.textContent = `Page ${pages}`;
         updateUI(isRunning);
 
@@ -37,8 +41,8 @@ document.addEventListener('DOMContentLoaded', () => {
         logArea.appendChild(entry);
         logArea.scrollTop = logArea.scrollHeight;
 
-        // Keep only last 20 logs
-        while (logArea.children.length > 20) {
+        // Keep only last 100 logs
+        while (logArea.children.length > 100) {
             logArea.removeChild(logArea.firstChild);
         }
     }
@@ -58,8 +62,9 @@ document.addEventListener('DOMContentLoaded', () => {
             delayInput.disabled = false;
         }
 
-        chrome.storage.local.get(['urls'], (data) => {
-            if (data.urls && data.urls.length > 0) {
+        chrome.storage.local.get(['urls', 'scrapedResults'], (data) => {
+            const hasData = (data.urls && data.urls.length > 0) || (data.scrapedResults && data.scrapedResults.length > 0);
+            if (hasData) {
                 downloadBtn.classList.remove('hidden');
             } else {
                 downloadBtn.classList.add('hidden');
@@ -102,8 +107,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     resetBtn.addEventListener('click', () => {
         if (confirm('Reset all collected data? This cannot be undone.')) {
-            chrome.storage.local.set({ urls: [], pages: 0, isRunning: false }, () => {
+            chrome.storage.local.set({ urls: [], scrapedResults: [], pages: 0, isRunning: false }, () => {
                 urlCountEle.textContent = '0';
+                scrapedCountEle.textContent = '0';
                 pageCountEle.textContent = 'Page 0';
                 isRunning = false;
                 updateUI(false);
@@ -114,30 +120,55 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     downloadBtn.addEventListener('click', () => {
-        chrome.storage.local.get(['urls'], (data) => {
-            const urls = data.urls || [];
-            if (urls.length === 0) return;
+        chrome.storage.local.get(['scrapedResults', 'urls'], (data) => {
+            const results = data.scrapedResults || data.urls || [];
+            if (results.length === 0) {
+                addLog('No data to export.', 'warn');
+                return;
+            }
 
-            addLog(`Exporting ${urls.length} records...`, 'info');
-            const headers = ['ID', 'Text', 'Filename', 'Scraped At'];
+            addLog(`Exporting ${results.length} records...`, 'info');
+
+            const headers = [
+                'Doc No', 'Registration Date', 'SRO', 'Village',
+                'Document Type', 'Consideration', 'Market Value',
+                'Area', 'Stamp Duty', 'Reg Fee', 'Executed Date',
+                'Barcode', 'Index/Book', 'Property Description',
+                'Sellers', 'Buyers', 'Scraped At'
+            ];
+
             const csvRows = [headers.join(',')];
 
-            urls.forEach(item => {
+            results.forEach(item => {
                 const row = [
-                    `"${(item.id || '').replace(/"/g, '""')}"`,
-                    `"${(item.text || '').replace(/"/g, '""')}"`,
-                    `"${(item.filename || '').replace(/"/g, '""')}"`,
-                    `"${item.scrapedAt}"`
+                    `"${(item.docNo || '').replace(/"/g, '""')}"`,
+                    `"${(item.registrationDate || item.date || '').replace(/"/g, '""')}"`,
+                    `"${(item.sro || '').replace(/"/g, '""')}"`,
+                    `"${(item.village || '').replace(/"/g, '""')}"`,
+                    `"${(item.docType || '').replace(/"/g, '""')}"`,
+                    `"${(item.consideration || '').replace(/"/g, '""')}"`,
+                    `"${(item.marketValue || '').replace(/"/g, '""')}"`,
+                    `"${(item.area || '').replace(/"/g, '""')}"`,
+                    `"${(item.stampDuty || '').replace(/"/g, '""')}"`,
+                    `"${(item.regFee || '').replace(/"/g, '""')}"`,
+                    `"${(item.executedDate || '').replace(/"/g, '""')}"`,
+                    `"${(item.barcode || '').replace(/"/g, '""')}"`,
+                    `"${(item.indexBook || '').replace(/"/g, '""')}"`,
+                    `"${(item.propertyDesc || '').replace(/"/g, '""')}"`,
+                    `"${(item.sellers ? item.sellers.join('; ') : '').replace(/"/g, '""')}"`,
+                    `"${(item.buyers ? item.buyers.join('; ') : '').replace(/"/g, '""')}"`,
+                    `"${item.scrapedAt || ''}"`
                 ];
                 csvRows.push(row.join(','));
             });
 
             const csvString = csvRows.join('\n');
-            const blob = new Blob([csvString], { type: 'text/csv' });
+            const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
+            const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '_');
             a.href = url;
-            a.download = `igr_data_${new Date().toISOString().slice(0, 10)}.csv`;
+            a.download = `igr_scraped_data_${timestamp}.csv`;
             a.click();
             URL.revokeObjectURL(url);
         });
@@ -146,12 +177,19 @@ document.addEventListener('DOMContentLoaded', () => {
     // Listen for events from background/content
     chrome.runtime.onMessage.addListener((request) => {
         if (request.action === 'updateStats') {
-            urlCountEle.textContent = request.urls;
-            pageCountEle.textContent = `Page ${request.pages}`;
-
-            // Pulse effect
-            urlCountEle.style.color = '#818cf8';
-            setTimeout(() => { urlCountEle.style.color = ''; }, 500);
+            if (request.urls !== undefined) {
+                urlCountEle.textContent = request.urls;
+                urlCountEle.style.color = '#818cf8';
+                setTimeout(() => { urlCountEle.style.color = ''; }, 500);
+            }
+            if (request.scraped !== undefined) {
+                scrapedCountEle.textContent = request.scraped;
+                scrapedCountEle.style.color = '#22c55e';
+                setTimeout(() => { scrapedCountEle.style.color = ''; }, 500);
+            }
+            if (request.pages !== undefined) {
+                pageCountEle.textContent = `Page ${request.pages}`;
+            }
         }
 
         if (request.action === 'log') {
@@ -186,4 +224,3 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 });
-

@@ -1,6 +1,7 @@
-# IGR Auto PDF — Chrome Extension
+# Mah-IGR-Insight (IGR Maharashtra Automation Pro)
 
-A Chrome Extension (Manifest V3) to **bulk download IGR Maharashtra land registration documents (IndexII) as PDFs**, with automatic multi-page pagination support.
+**Automate IGR Maharashtra land record scraping with this premium Chrome Extension (MV3). Bulk extract Index II data, auto-handle pagination, and export clean CSVs. Features a sleek glassmorphic UI, live progress logs, and adjustable delays for slow servers. Scrape property details, party names, and financials with ease. Fast and reliable.**
+
 
 ---
 

@@ -3,6 +3,9 @@ const IGR_URL_GLOB = 'https://freesearchigrservice.maharashtra.gov.in/*';
 
 /** Gap after closing popup before clicking the next Index II row */
 const ROW_GAP_AFTER_SUCCESS_MS = 300;
+/** Wait for ASP.NET pager postback after clicking next page */
+const PAGER_CLICK_DELAY_MS = 1200;
+const PAGER_RESCAN_DELAY_MS = 4500;
 /** Poll interval while waiting for popup HTML to be scrape-ready */
 const POPUP_SCRAPE_POLL_MS = 350;
 const POPUP_SCRAPE_MAX_MS = 30000;
@@ -93,12 +96,17 @@ chrome.runtime.onMessage.addListener((message, sender) => {
         const tabId = sender.tab?.id;
         if (!tabId) return;
         setTimeout(async () => {
-            await clickInMainWorld(tabId, '[data-scraper-id="next-page-btn"]');
+            sendLog('Loading next results page...', 'info');
+            const clicked = await clickInMainWorld(tabId, '[data-scraper-id="next-page-btn"]');
+            if (!clicked) {
+                sendLog('Next page button not found. Check pagination on the grid.', 'warn');
+                return;
+            }
             setTimeout(async () => {
                 await injectIntoTab(tabId);
                 chrome.tabs.sendMessage(tabId, { action: 'rescan' }).catch(() => { });
-            }, 6000);
-        }, 3000);
+            }, PAGER_RESCAN_DELAY_MS);
+        }, PAGER_CLICK_DELAY_MS);
         return;
     }
 

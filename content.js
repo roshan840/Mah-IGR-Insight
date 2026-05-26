@@ -191,9 +191,10 @@
                 const nextPagesCount = (data.pages || 0) + 1;
                 chrome.storage.local.set({ pages: nextPagesCount, igrLastScanKey: '' });
 
-                const nextBtn = findNextButton();
+                const targetGridPage = nextPagesCount + 1;
+                const nextBtn = findNextButton(targetGridPage);
                 if (nextBtn) {
-                    sendLog(`Moving to Page ${nextPagesCount + 1}...`, 'info');
+                    sendLog(`Moving to page ${targetGridPage} (rows ${targetGridPage * 10 - 9}–${targetGridPage * 10})...`, 'info');
                     nextBtn.setAttribute('data-scraper-id', 'next-page-btn');
                     chrome.runtime.sendMessage({ action: 'triggerNextPage', nextPage: nextPagesCount });
                 } else {
@@ -267,32 +268,76 @@
         });
     }
 
-    function findNextButton() {
-        const grid = getRegistrationGrid();
-        const scope = grid || document;
-        const allPageLinks = Array.from(
-            scope.querySelectorAll("a[href*='Page$'], a[onclick*='Page$']")
-        );
-        let currentPage = 1;
+    function parsePageFromElement(el) {
+        const raw = `${el.getAttribute('onclick') || ''} ${el.getAttribute('href') || ''}`;
+        const match = raw.match(/Page\$(\d+)/i);
+        if (match) return parseInt(match[1], 10);
+        const text = el.innerText.trim();
+        if (/^\d+$/.test(text)) return parseInt(text, 10);
+        return null;
+    }
 
-        if (grid) {
-            const pagerRow = grid.querySelector('tr:last-child');
-            const currentSpan = pagerRow?.querySelector('span, b');
-            if (currentSpan) {
-                const parsed = parseInt(currentSpan.innerText.trim(), 10);
-                if (!isNaN(parsed)) currentPage = parsed;
+    function getCurrentPageFromGrid(grid) {
+        if (!grid) return null;
+        const pagerRow = grid.querySelector('tr:last-child');
+        if (!pagerRow) return null;
+
+        for (const cell of pagerRow.querySelectorAll('td')) {
+            if (cell.querySelector('a')) continue;
+            const label = cell.querySelector('span, b, strong') || cell;
+            const n = parseInt(label.innerText.trim(), 10);
+            if (!isNaN(n) && n > 0) return n;
+        }
+        return null;
+    }
+
+    function collectPagerLinks(grid) {
+        const scope = grid || document;
+        const pagerRow = grid?.querySelector('tr:last-child');
+        const roots = pagerRow ? [pagerRow, scope] : [scope];
+        const links = [];
+        const seen = new Set();
+
+        for (const root of roots) {
+            for (const a of root.querySelectorAll('a')) {
+                const pageNum = parsePageFromElement(a);
+                if (pageNum == null || seen.has(a)) continue;
+                seen.add(a);
+                links.push({ el: a, pageNum, label: a.innerText.trim() });
             }
         }
+        return links;
+    }
 
-        const nextPageNum = currentPage + 1;
-        const nextLink = allPageLinks.find((a) => {
-            const text = a.innerText.trim();
-            return parseInt(text, 10) === nextPageNum
-                || (text === '...' && (a.getAttribute('onclick') || '').includes(`Page$${nextPageNum}`));
-        });
-        if (nextLink) return nextLink;
+    /**
+     * Find pager control for grid page N (2 → rows 11–20, 11 → rows 101–110, etc.).
+     * Handles numeric links and "..." jumps (Page$11, Page$21, …).
+     */
+    function findNextButton(targetGridPage) {
+        const grid = getRegistrationGrid();
+        const currentPage = getCurrentPageFromGrid(grid) ?? (targetGridPage - 1);
+        const targetPage = targetGridPage ?? (currentPage + 1);
+        const links = collectPagerLinks(grid);
 
-        return scope.querySelector("[id*='btnNext'], .next, .PagerNext");
+        const exact = links.find((l) => l.pageNum === targetPage);
+        if (exact) return exact.el;
+
+        const smallestForward = links
+            .filter((l) => l.pageNum > currentPage)
+            .sort((a, b) => a.pageNum - b.pageNum)[0];
+        if (smallestForward) return smallestForward.el;
+
+        const scope = grid || document;
+        for (const a of scope.querySelectorAll('a')) {
+            const label = a.innerText.trim();
+            if (label !== '...' && label !== '…' && !/^>+$/.test(label)) continue;
+            const pageNum = parsePageFromElement(a);
+            if (pageNum != null && pageNum >= targetPage) return a;
+        }
+
+        return scope.querySelector(
+            "[id*='btnNext'], .next, .PagerNext, a[title*='Next' i], a[title*='अगली' i]"
+        );
     }
 
     checkAndRun();

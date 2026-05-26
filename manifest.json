@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "IGR Maharashtra Automation Pro",
-    "version": "1.5",
+    "version": "1.6",
     "description": "High-performance web scraper for IGR Maharashtra search results.",
     "incognito": "spanning",
     "permissions": [

@@ -1,12 +1,11 @@
 {
     "manifest_version": 3,
     "name": "IGR Maharashtra Automation Pro",
-    "version": "1.2",
+    "version": "1.5",
     "description": "High-performance web scraper for IGR Maharashtra search results.",
     "incognito": "spanning",
     "permissions": [
         "storage",
-        "downloads",
         "activeTab",
         "scripting",
         "tabs"
@@ -14,8 +13,7 @@
     "host_permissions": [
         "https://freesearchigrservice.maharashtra.gov.in/*",
         "https://*.maharashtra.gov.in/*",
-        "https://igrmahhelpline.gov.in/*",
-        "<all_urls>"
+        "https://igrmahhelpline.gov.in/*"
     ],
     "action": {
         "default_popup": "popup.html"

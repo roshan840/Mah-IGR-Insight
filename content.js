@@ -1,196 +1,303 @@
-// Run in all frames (IGR sometimes uses frames for the grid)
-console.log("IGR Scraper: Content Script Loaded in " + (window === window.top ? "Top Frame" : "Sub-frame"));
+(function initIgrScraper() {
+    if (window.__igrScraperLoaded) return;
+    window.__igrScraperLoaded = true;
 
-let extractionConfig = {
-    // Robust selector covering variations seen on IGR
-    linkSelector: "input[value*='ndex'], input[onclick*='ndexII'], a[onclick*='ndexII'], [id*='btnIndex']",
-    highlightColor: "3px solid #6366f1",
-    delay: 3000
-};
+    const LINK_SELECTOR = [
+        '#RegistrationGrid input[type="button"]',
+        '#RegistrationGrid input[type="submit"]',
+        '#RegistrationGrid a',
+        "input[value*='ndex']",
+        "input[onclick*='ndexII']",
+        "input[onclick*='IndexII']",
+        "a[onclick*='ndexII']",
+        "a[onclick*='IndexII']",
+        "[id*='btnIndex']"
+    ].join(', ');
+    const HIGHLIGHT_STYLE = '3px solid #6366f1';
 
-function sendLog(message, logType = 'info') {
-    if (isContextValid()) {
+    let resultsObserver = null;
+    let resultsPollTimer = null;
+    let waitingForResults = false;
+    let debounceTimer = null;
+
+    function isContextValid() {
+        return typeof chrome !== 'undefined' && !!chrome.runtime?.id;
+    }
+
+    function getRegistrationGrid() {
+        return document.getElementById('RegistrationGrid');
+    }
+
+    function isResultsFrame() {
+        if (getRegistrationGrid()) return true;
+        return findIndexIIButtons().length > 0;
+    }
+
+    function sendLog(message, logType = 'info') {
+        if (!isContextValid()) return;
         chrome.runtime.sendMessage({ action: 'log', message, logType }).catch(() => { });
     }
-}
 
-function isContextValid() {
-    return typeof chrome !== 'undefined' && chrome.runtime && !!chrome.runtime.id;
-}
+    function isIndexIIButton(el) {
+        const val = (el.value || el.textContent || el.innerText || '').toLowerCase();
+        const onClick = (el.getAttribute('onclick') || el.getAttribute('href') || '').toLowerCase();
+        const id = (el.id || '').toLowerCase();
+        return (
+            val.includes('index')
+            || onClick.includes('indexii')
+            || onClick.includes('indexii$')
+            || id.includes('btnindex')
+        );
+    }
 
-function checkAndRun() {
-    if (!isContextValid()) return;
-    chrome.storage.local.get(['isRunning', 'urls', 'pages'], (data) => {
-        if (data.isRunning) {
-            scrapeWithRetry(data.urls || [], data.pages || 0);
+    function findIndexIIButtons() {
+        const grid = getRegistrationGrid();
+        const roots = grid ? [grid] : [document];
+        const found = [];
+        const seen = new Set();
+
+        for (const root of roots) {
+            for (const el of root.querySelectorAll(LINK_SELECTOR)) {
+                if (!isIndexIIButton(el) || seen.has(el)) continue;
+                seen.add(el);
+                found.push(el);
+            }
         }
-    });
-}
 
-async function scrapeWithRetry(existingUrls, pagesCount, attempt = 1) {
-    if (!isContextValid()) return;
+        if (found.length > 0) return found;
+        return Array.from(document.querySelectorAll(LINK_SELECTOR)).filter(isIndexIIButton);
+    }
 
-    const grid = document.getElementById('RegistrationGrid');
-    const allLinks = Array.from(document.querySelectorAll(extractionConfig.linkSelector))
-        .filter(el => {
-            const val = (el.value || el.innerText || '').toLowerCase();
-            const onClick = (el.getAttribute('onclick') || '').toLowerCase();
-            return val.includes('index') || onClick.includes('indexii');
+    function stopResultsWatch() {
+        waitingForResults = false;
+        if (resultsObserver) {
+            resultsObserver.disconnect();
+            resultsObserver = null;
+        }
+        if (resultsPollTimer) {
+            clearInterval(resultsPollTimer);
+            resultsPollTimer = null;
+        }
+        if (debounceTimer) {
+            clearTimeout(debounceTimer);
+            debounceTimer = null;
+        }
+    }
+
+    function scheduleResultsCheck() {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(tryAutoScrape, 400);
+    }
+
+    function tryAutoScrape() {
+        if (!isContextValid() || !waitingForResults) return;
+
+        chrome.storage.local.get(['isRunning', 'urls', 'pages'], (data) => {
+            if (!data.isRunning) {
+                stopResultsWatch();
+                return;
+            }
+            if (!isResultsFrame() || findIndexIIButtons().length === 0) return;
+
+            stopResultsWatch();
+            scrapeWithRetry(data.urls || [], data.pages || 0, 1);
         });
+    }
 
-    if (allLinks.length === 0) {
-        if (attempt < 5) {
-            console.log(`IGR Scraper: No buttons yet (Attempt ${attempt}). Grid found: ${!!grid}. Retrying...`);
-            setTimeout(() => scrapeWithRetry(existingUrls, pagesCount, attempt + 1), 2000);
+    function startResultsWatch() {
+        if (waitingForResults) return;
+        waitingForResults = true;
+
+        if (!resultsObserver) {
+            resultsObserver = new MutationObserver(scheduleResultsCheck);
+            const target = document.documentElement || document.body;
+            if (target) {
+                resultsObserver.observe(target, { childList: true, subtree: true, attributes: true });
+            }
+        }
+
+        if (!resultsPollTimer) {
+            resultsPollTimer = setInterval(scheduleResultsCheck, 2000);
+        }
+
+        scheduleResultsCheck();
+    }
+
+    function beginScrape(existingUrls, pagesCount) {
+        if (!isContextValid()) return;
+
+        if (isResultsFrame() && findIndexIIButtons().length > 0) {
+            stopResultsWatch();
+            scrapeWithRetry(existingUrls, pagesCount, 1);
             return;
         }
-        // Only log "None found" in the top frame to avoid spam
-        if (window === window.top) sendLog("No documents found on this page.", "warn");
-        return;
+
+        if (window === window.top) {
+            sendLog('Waiting for search results to appear...', 'info');
+        }
+        startResultsWatch();
     }
 
-    console.log(`IGR Scraper: Found ${allLinks.length} documents on this page.`);
-    sendLog(`Found ${allLinks.length} documents. Starting extraction...`, "success");
-    scrapePage(existingUrls, pagesCount, Array.from(allLinks));
-}
-
-// Listen for messages FROM background or popup
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (!isContextValid()) return;
-
-    if (request.action === 'start') {
-        chrome.storage.local.set({ isRunning: true }, () => {
-            checkAndRun();
-        });
-    }
-
-    if (request.action === 'stop') {
-        chrome.storage.local.set({ isRunning: false });
-        sendLog("Extraction stopped.", "warn");
-    }
-
-    if (request.action === 'pageFinished') {
-        chrome.storage.local.get(['isRunning', 'pages'], (data) => {
-            if (!data.isRunning) return;
-
-            const nextPagesCount = (data.pages || 0) + 1;
-            chrome.storage.local.set({ pages: nextPagesCount });
-
-            const nextBtn = findNextButton();
-            if (nextBtn) {
-                console.log("IGR Scraper: Batch finished. Moving to next page...");
-                sendLog(`Moving to Page ${nextPagesCount + 1}...`, "info");
-                nextBtn.setAttribute('data-scraper-id', 'next-page-btn');
-                chrome.runtime.sendMessage({
-                    action: 'triggerNextPage',
-                    nextPage: nextPagesCount
-                });
-            } else {
-                console.log("IGR Scraper: All pages finished.");
-                sendLog("No more pages found. Sequence finished.", "success");
-                chrome.storage.local.set({ isRunning: false });
-                chrome.runtime.sendMessage({ action: 'finished' });
-            }
-        });
-    }
-
-    if (request.action === 'rescan') {
+    function checkAndRun() {
+        if (!isContextValid()) return;
         chrome.storage.local.get(['isRunning', 'urls', 'pages'], (data) => {
-            if (!data.isRunning) return;
-            console.log(`IGR Scraper: Rescanning after pagination (Page ${data.pages || 0})...`);
-            scrapeWithRetry(data.urls || [], data.pages || 0);
+            if (data.isRunning) beginScrape(data.urls || [], data.pages || 0);
         });
     }
-});
 
-async function scrapePage(existingUrls, pagesCount, allLinks) {
-    if (!isContextValid()) return;
+    async function scrapeWithRetry(existingUrls, pagesCount, attempt = 1) {
+        if (!isContextValid() || !isResultsFrame()) return;
 
-    const queueForBackground = [];
-    const newLinks = [];
+        const allLinks = findIndexIIButtons();
+        if (allLinks.length === 0) {
+            if (attempt < 5) {
+                setTimeout(() => scrapeWithRetry(existingUrls, pagesCount, attempt + 1), 1500);
+                return;
+            }
+            chrome.storage.local.get(['isRunning'], (data) => {
+                if (data.isRunning) startResultsWatch();
+            });
+            return;
+        }
 
-    allLinks.forEach((link, index) => {
-        let realIndex = index;
-        const onclickText = link.getAttribute('onclick') || '';
-        const match = onclickText.match(/indexII\$(\d+)/);
-        if (match) realIndex = parseInt(match[1]);
+        sendLog(`Found ${allLinks.length} documents. Starting extraction...`, 'success');
+        scrapePage(existingUrls, pagesCount, allLinks);
+    }
 
-        const scraperId = `btn_p${pagesCount}_i${realIndex}`;
-        link.setAttribute('data-scraper-id', scraperId);
+    chrome.runtime.onMessage.addListener((request) => {
+        if (!isContextValid()) return;
 
-        link.style.border = extractionConfig.highlightColor;
-        link.style.boxShadow = "0 0 10px rgba(99, 102, 241, 0.5)";
+        if (request.action === 'start') {
+            chrome.storage.local.set({ isRunning: true, igrLastScanKey: '' }, () => {
+                chrome.storage.local.get(['urls', 'pages'], (data) => {
+                    beginScrape(data.urls || [], data.pages || 0);
+                });
+            });
+            return;
+        }
 
-        let docName = "IGR_Doc";
-        try {
+        if (request.action === 'stop') {
+            stopResultsWatch();
+            chrome.storage.local.set({ isRunning: false });
+            sendLog('Extraction stopped.', 'warn');
+            return;
+        }
+
+        if (request.action === 'pageFinished') {
+            if (!isResultsFrame()) return;
+            chrome.storage.local.get(['isRunning', 'pages'], (data) => {
+                if (!data.isRunning) return;
+
+                const nextPagesCount = (data.pages || 0) + 1;
+                chrome.storage.local.set({ pages: nextPagesCount, igrLastScanKey: '' });
+
+                const nextBtn = findNextButton();
+                if (nextBtn) {
+                    sendLog(`Moving to Page ${nextPagesCount + 1}...`, 'info');
+                    nextBtn.setAttribute('data-scraper-id', 'next-page-btn');
+                    chrome.runtime.sendMessage({ action: 'triggerNextPage', nextPage: nextPagesCount });
+                } else {
+                    sendLog('No more pages found. Sequence finished.', 'success');
+                    chrome.storage.local.set({ isRunning: false });
+                    chrome.runtime.sendMessage({ action: 'finished' });
+                }
+            });
+            return;
+        }
+
+        if (request.action === 'rescan') {
+            chrome.storage.local.get(['isRunning', 'urls', 'pages'], (data) => {
+                if (!data.isRunning) return;
+                beginScrape(data.urls || [], data.pages || 0);
+            });
+        }
+    });
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local' || !changes.isRunning?.newValue) return;
+        chrome.storage.local.get(['urls', 'pages'], (data) => {
+            beginScrape(data.urls || [], data.pages || 0);
+        });
+    });
+
+    function scrapePage(existingUrls, pagesCount, allLinks) {
+        if (!isContextValid()) return;
+
+        const queueItems = allLinks.map((link) => {
+            let realIndex = 0;
+            const onclickText = link.getAttribute('onclick') || link.getAttribute('href') || '';
+            const match = onclickText.match(/indexII\$(\d+)/i);
+            if (match) realIndex = parseInt(match[1], 10);
+
+            const scraperId = `btn_p${pagesCount}_i${realIndex}`;
+            link.setAttribute('data-scraper-id', scraperId);
+            link.style.border = HIGHLIGHT_STYLE;
+            link.style.boxShadow = '0 0 10px rgba(99, 102, 241, 0.5)';
+
+            let docName = 'IGR_Doc';
             const row = link.closest('tr');
-            if (row && row.cells.length >= 3) {
+            if (row?.cells?.length >= 3) {
                 const docNo = row.cells[0].innerText.trim();
                 const dName = row.cells[1].innerText.trim();
                 const rDate = row.cells[2].innerText.trim();
                 docName = `${docNo}_${dName}_${rDate}`.replace(/[\\/:*?"<>|]/g, '_');
             }
-        } catch (e) { }
 
-        let item = {
-            id: scraperId,
-            index: realIndex,
-            filename: `${docName}_P${pagesCount + 1}_R${realIndex + 1}`,
-            scrapedAt: new Date().toISOString()
-        };
-
-        newLinks.push(item);
-        queueForBackground.push({ id: scraperId, index: realIndex, filename: item.filename });
-    });
-
-    const updatedUrls = [...existingUrls, ...newLinks];
-    chrome.storage.local.get(['isRunning'], (data) => {
-        if (!data.isRunning) return;
-
-        chrome.storage.local.set({ urls: updatedUrls });
-        chrome.runtime.sendMessage({
-            action: 'updateStats',
-            urls: updatedUrls.length,
-            pages: pagesCount + 1
+            const filename = `${docName}_P${pagesCount + 1}_R${realIndex + 1}`;
+            return { id: scraperId, index: realIndex, filename, scrapedAt: new Date().toISOString() };
         });
 
-        if (queueForBackground.length > 0) {
-            console.log(`IGR Scraper: Enqueueing ${queueForBackground.length} documents...`);
+        const scanKey = `p${pagesCount}:n${queueItems.length}:f${queueItems[0]?.id || ''}`;
+
+        chrome.storage.local.get(['isRunning', 'igrLastScanKey'], (data) => {
+            if (!data.isRunning || queueItems.length === 0) return;
+            if (data.igrLastScanKey === scanKey) return;
+
+            const updatedUrls = existingUrls.concat(queueItems);
+            chrome.storage.local.set({ urls: updatedUrls, igrLastScanKey: scanKey });
+            chrome.runtime.sendMessage({
+                action: 'updateStats',
+                urls: updatedUrls.length,
+                pages: pagesCount + 1
+            });
             chrome.runtime.sendMessage({
                 action: 'enqueueDownloads',
-                links: queueForBackground
+                links: queueItems.map(({ id, index, filename }) => ({ id, index, filename }))
             });
-        }
-    });
-}
+        });
+    }
 
-function findNextButton() {
-    const allPageLinks = Array.from(document.querySelectorAll("a[href*='Page$'], a[onclick*='Page$']"));
-    const grid = document.getElementById('RegistrationGrid');
-    let currentPage = 1;
+    function findNextButton() {
+        const grid = getRegistrationGrid();
+        const scope = grid || document;
+        const allPageLinks = Array.from(
+            scope.querySelectorAll("a[href*='Page$'], a[onclick*='Page$']")
+        );
+        let currentPage = 1;
 
-    if (grid) {
-        const pagerRow = grid.querySelector('tr:last-child');
-        if (pagerRow) {
-            const currentSpan = pagerRow.querySelector('span, b');
+        if (grid) {
+            const pagerRow = grid.querySelector('tr:last-child');
+            const currentSpan = pagerRow?.querySelector('span, b');
             if (currentSpan) {
-                const parsed = parseInt(currentSpan.innerText.trim());
+                const parsed = parseInt(currentSpan.innerText.trim(), 10);
                 if (!isNaN(parsed)) currentPage = parsed;
             }
         }
+
+        const nextPageNum = currentPage + 1;
+        const nextLink = allPageLinks.find((a) => {
+            const text = a.innerText.trim();
+            return parseInt(text, 10) === nextPageNum
+                || (text === '...' && (a.getAttribute('onclick') || '').includes(`Page$${nextPageNum}`));
+        });
+        if (nextLink) return nextLink;
+
+        return scope.querySelector("[id*='btnNext'], .next, .PagerNext");
     }
 
-    const nextPageNum = currentPage + 1;
-    const nextLink = allPageLinks.find(a => (parseInt(a.innerText.trim()) === nextPageNum) || ((a.innerText.trim() === '...') && (a.getAttribute('onclick') || '').includes(`Page$${nextPageNum}`)));
+    checkAndRun();
 
-    if (nextLink) return nextLink;
-
-    // Last resort
-    return document.querySelector("[id*='btnNext'], .next, .PagerNext");
-}
-
-if (document.readyState === 'complete') {
-    setTimeout(checkAndRun, 2500);
-} else {
-    window.addEventListener('load', () => setTimeout(checkAndRun, 2500));
-}
+    if (isResultsFrame()) {
+        console.log('IGR Scraper: watching for results', location.href);
+    }
+})();

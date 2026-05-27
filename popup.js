@@ -90,7 +90,9 @@ document.addEventListener('DOMContentLoaded', () => {
         updateUI(isRunning);
 
         if (isRunning) {
-            chrome.storage.local.set({ configDelay: getDelayMs(), igrLastScanKey: '' });
+            chrome.storage.local.set({
+                configDelay: getDelayMs(), igrLastScanKey: '', igrScrapedGridPages: [], pages: 0
+            });
             addLog('Starting — will auto-detect when results load...', 'success');
             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                 const tab = tabs[0];
@@ -120,7 +122,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     resetBtn.addEventListener('click', () => {
         if (!confirm('Reset all collected data? This cannot be undone.')) return;
-        chrome.storage.local.set({ urls: [], scrapedResults: [], pages: 0, isRunning: false, igrLastScanKey: '' }, () => {
+        chrome.storage.local.set({
+            urls: [], scrapedResults: [], pages: 0, isRunning: false,
+            igrLastScanKey: '', igrScrapedGridPages: []
+        }, () => {
             isRunning = false;
             refreshStats(0, 0, 0);
             updateUI(false);

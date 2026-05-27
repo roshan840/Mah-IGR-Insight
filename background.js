@@ -94,19 +94,42 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 
     if (message.action === 'triggerNextPage') {
         const tabId = sender.tab?.id;
-        if (!tabId) return;
+        const targetPage = message.targetPage;
+        const previousPage = message.previousPage;
+        if (!tabId || !targetPage) return;
+
         setTimeout(async () => {
-            sendLog('Loading next results page...', 'info');
             const clicked = await clickInMainWorld(tabId, '[data-scraper-id="next-page-btn"]');
             if (!clicked) {
-                sendLog('Next page button not found. Check pagination on the grid.', 'warn');
+                sendLog(`Pagination failed: could not click page ${targetPage}. Stopping.`, 'warn');
+                await chrome.storage.local.set({ isRunning: false });
+                chrome.runtime.sendMessage({ action: 'finished' }).catch(() => { });
                 return;
             }
+
             setTimeout(async () => {
                 await injectIntoTab(tabId);
-                chrome.tabs.sendMessage(tabId, { action: 'rescan' }).catch(() => { });
+                try {
+                    await chrome.tabs.sendMessage(tabId, {
+                        action: 'scrapeAfterPagination',
+                        targetPage,
+                        previousPage: previousPage ?? targetPage - 1
+                    });
+                } catch {
+                    sendLog('Pagination failed: results frame not reachable. Stopping.', 'warn');
+                    await chrome.storage.local.set({ isRunning: false });
+                    chrome.runtime.sendMessage({ action: 'finished' }).catch(() => { });
+                }
             }, PAGER_RESCAN_DELAY_MS);
         }, PAGER_CLICK_DELAY_MS);
+        return;
+    }
+
+    if (message.action === 'paginationFailed') {
+        resetQueue();
+        chrome.storage.local.set({ isRunning: false });
+        sendLog(message.reason || 'Pagination failed. Stopped.', 'warn');
+        chrome.runtime.sendMessage({ action: 'finished' }).catch(() => { });
         return;
     }
 
